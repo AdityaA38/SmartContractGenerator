@@ -149,7 +149,6 @@ class VerbwireService: ObservableObject {
     }
 }
 
-// MARK: - ViewModels
 class ContractGeneratorViewModel: ObservableObject {
     @Published var contracts: [GeneratedContract] = []
     @Published var isGenerating = false
@@ -201,7 +200,6 @@ class ContractGeneratorViewModel: ObservableObject {
         
         Task {
             do {
-                // First upload to IPFS
                 let metadata = [
                     "name": contract.name,
                     "description": contract.explanation,
@@ -213,7 +211,6 @@ class ContractGeneratorViewModel: ObservableObject {
                     metadata: metadata
                 )
                 
-                // Then deploy the contract
                 let deployResponse = try await verbwireService.deployContract(
                     code: contract.code,
                     contractName: contract.name
@@ -243,7 +240,6 @@ class ContractGeneratorViewModel: ObservableObject {
     }
 }
 
-// MARK: - Views
 struct ContentView: View {
     @StateObject private var viewModel = ContractGeneratorViewModel()
     @State private var selectedTab = 0
@@ -288,7 +284,6 @@ struct GeneratorView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
-                    // Header
                     VStack {
                         Image(systemName: "doc.text.fill")
                             .font(.system(size: 60))
@@ -305,7 +300,6 @@ struct GeneratorView: View {
                     }
                     .padding()
                     
-                    // Contract Type Selector
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Contract Type")
                             .font(.headline)
@@ -332,7 +326,6 @@ struct GeneratorView: View {
                     }
                     .padding(.horizontal)
                     
-                    // Parameters based on contract type
                     if contractType == "ERC721" || contractType == "ERC20" || contractType == "ERC1155" {
                         VStack(alignment: .leading, spacing: 15) {
                             Text("Token Parameters")
@@ -353,7 +346,6 @@ struct GeneratorView: View {
                         .padding(.horizontal)
                     }
                     
-                    // Generate Button
                     Button(action: generateContract) {
                         HStack {
                             if viewModel.isGenerating {
@@ -525,7 +517,6 @@ struct ContractDetailView: View {
                         .foregroundColor(.secondary)
                 }
                 
-                // Contract Address
                 if let address = contract.contractAddress {
                     VStack(alignment: .leading, spacing: 5) {
                         Text("Contract Address")
@@ -541,7 +532,6 @@ struct ContractDetailView: View {
                     }
                 }
                 
-                // Explanation
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Explanation")
                         .font(.headline)
@@ -551,7 +541,6 @@ struct ContractDetailView: View {
                         .foregroundColor(.secondary)
                 }
                 
-                // Action Buttons
                 VStack(spacing: 15) {
                     Button(action: { showingCode.toggle() }) {
                         HStack {
@@ -592,7 +581,6 @@ struct ContractDetailView: View {
                     }
                 }
                 
-                // Code Display
                 if showingCode {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Smart Contract Code")
@@ -617,7 +605,6 @@ struct ContractDetailView: View {
     }
 }
 
-// MARK: - App Entry Point
 @main
 struct SmartContractGeneratorApp: App {
     var body: some Scene {
