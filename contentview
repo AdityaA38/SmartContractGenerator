@@ -1,0 +1,628 @@
+import SwiftUI
+import Foundation
+
+struct ContractRequest {
+    let contractType: String
+    let description: String
+    let parameters: [String: String]
+}
+
+struct GeneratedContract {
+    let id = UUID()
+    let name: String
+    let code: String
+    let explanation: String
+    let contractAddress: String?
+    let deploymentStatus: DeploymentStatus
+    let createdAt: Date
+}
+
+enum DeploymentStatus {
+    case generated
+    case deploying
+    case deployed
+    case failed
+}
+
+struct VerbwireDeployResponse: Codable {
+    let contract_address: String
+    let transaction_hash: String
+    let status: String
+}
+
+class OpenAIService: ObservableObject {
+    private let apiKey = "YOUR_OPENAI_API_KEY"
+    private let baseURL = "https://api.openai.com/v1/chat/completions"
+    
+    func generateSmartContract(request: ContractRequest) async throws -> (code: String, explanation: String) {
+        let prompt = createPrompt(for: request)
+        
+        let requestBody: [String: Any] = [
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                ["role": "system", "content": "You are a Solidity smart contract expert. Generate secure, well-documented smart contracts."],
+                ["role": "user", "content": prompt]
+            ],
+            "max_tokens": 2000,
+            "temperature": 0.3
+        ]
+        
+        var urlRequest = URLRequest(url: URL(string: baseURL)!)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        
+        let (data, _) = try await URLSession.shared.data(for: urlRequest)
+        let response = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        
+        let choices = response["choices"] as! [[String: Any]]
+        let message = choices[0]["message"] as! [String: Any]
+        let content = message["content"] as! String
+        
+        // Parse the response to separate code and explanation
+        let parts = content.components(separatedBy: "EXPLANATION:")
+        let code = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+        let explanation = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : "Smart contract generated successfully."
+        
+        return (code: code, explanation: explanation)
+    }
+    
+    private func createPrompt(for request: ContractRequest) -> String {
+        var prompt = "Generate a Solidity smart contract for: \(request.contractType)\n"
+        prompt += "Description: \(request.description)\n"
+        
+        if !request.parameters.isEmpty {
+            prompt += "Parameters:\n"
+            for (key, value) in request.parameters {
+                prompt += "- \(key): \(value)\n"
+            }
+        }
+        
+        prompt += """
+        
+        Requirements:
+        1. Include proper pragma and license
+        2. Add comprehensive comments
+        3. Include security best practices
+        4. Make it deployment-ready
+        5. Add basic error handling
+        
+        Format your response as:
+        [SOLIDITY CODE]
+        
+        EXPLANATION:
+        [Brief explanation of the contract's functionality and key features]
+        """
+        
+        return prompt
+    }
+}
+
+class VerbwireService: ObservableObject {
+    private let apiKey = "YOUR_VERBWIRE_API_KEY"
+    private let baseURL = "https://api.verbwire.com/v1"
+    
+    func deployContract(code: String, contractName: String) async throws -> VerbwireDeployResponse {
+        let url = URL(string: "\(baseURL)/nft/deploy/deployContract")!
+        
+        let requestBody: [String: Any] = [
+            "contractSourceCode": code,
+            "contractName": contractName,
+            "compilerVersion": "0.8.19",
+            "chain": "goerli" // Using testnet
+        ]
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let response = try JSONDecoder().decode(VerbwireDeployResponse.self, from: data)
+        
+        return response
+    }
+    
+    func uploadContractToIPFS(code: String, metadata: [String: Any]) async throws -> String {
+        let url = URL(string: "\(baseURL)/nft/store/file")!
+        
+        let contractData = [
+            "contract_code": code,
+            "metadata": metadata,
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ] as [String : Any]
+        
+        let jsonData = try JSONSerialization.data(withJSONObject: contractData)
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonData
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let response = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        
+        return response["ipfs_hash"] as! String
+    }
+}
+
+// MARK: - ViewModels
+class ContractGeneratorViewModel: ObservableObject {
+    @Published var contracts: [GeneratedContract] = []
+    @Published var isGenerating = false
+    @Published var isDeploying = false
+    @Published var errorMessage: String?
+    
+    private let openAIService = OpenAIService()
+    private let verbwireService = VerbwireService()
+    
+    func generateContract(type: String, description: String, parameters: [String: String]) {
+        isGenerating = true
+        errorMessage = nil
+        
+        Task {
+            do {
+                let request = ContractRequest(
+                    contractType: type,
+                    description: description,
+                    parameters: parameters
+                )
+                
+                let result = try await openAIService.generateSmartContract(request: request)
+                
+                let contract = GeneratedContract(
+                    name: "\(type)_\(Date().timeIntervalSince1970)",
+                    code: result.code,
+                    explanation: result.explanation,
+                    contractAddress: nil,
+                    deploymentStatus: .generated,
+                    createdAt: Date()
+                )
+                
+                await MainActor.run {
+                    self.contracts.insert(contract, at: 0)
+                    self.isGenerating = false
+                }
+                
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "Failed to generate contract: \(error.localizedDescription)"
+                    self.isGenerating = false
+                }
+            }
+        }
+    }
+    
+    func deployContract(_ contract: GeneratedContract) {
+        isDeploying = true
+        
+        Task {
+            do {
+                // First upload to IPFS
+                let metadata = [
+                    "name": contract.name,
+                    "description": contract.explanation,
+                    "contract_type": "AI Generated Smart Contract"
+                ]
+                
+                let ipfsHash = try await verbwireService.uploadContractToIPFS(
+                    code: contract.code,
+                    metadata: metadata
+                )
+                
+                // Then deploy the contract
+                let deployResponse = try await verbwireService.deployContract(
+                    code: contract.code,
+                    contractName: contract.name
+                )
+                
+                await MainActor.run {
+                    if let index = self.contracts.firstIndex(where: { $0.id == contract.id }) {
+                        self.contracts[index] = GeneratedContract(
+                            name: contract.name,
+                            code: contract.code,
+                            explanation: contract.explanation,
+                            contractAddress: deployResponse.contract_address,
+                            deploymentStatus: .deployed,
+                            createdAt: contract.createdAt
+                        )
+                    }
+                    self.isDeploying = false
+                }
+                
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "Failed to deploy contract: \(error.localizedDescription)"
+                    self.isDeploying = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Views
+struct ContentView: View {
+    @StateObject private var viewModel = ContractGeneratorViewModel()
+    @State private var selectedTab = 0
+    
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            GeneratorView(viewModel: viewModel)
+                .tabItem {
+                    Image(systemName: "doc.text")
+                    Text("Generate")
+                }
+                .tag(0)
+            
+            ContractsListView(viewModel: viewModel)
+                .tabItem {
+                    Image(systemName: "list.bullet")
+                    Text("Contracts")
+                }
+                .tag(1)
+        }
+        .alert("Error", isPresented: .constant(viewModel.errorMessage != nil)) {
+            Button("OK") {
+                viewModel.errorMessage = nil
+            }
+        } message: {
+            Text(viewModel.errorMessage ?? "")
+        }
+    }
+}
+
+struct GeneratorView: View {
+    @ObservedObject var viewModel: ContractGeneratorViewModel
+    @State private var contractType = "ERC721"
+    @State private var description = ""
+    @State private var tokenName = ""
+    @State private var tokenSymbol = ""
+    @State private var maxSupply = ""
+    
+    let contractTypes = ["ERC721", "ERC20", "ERC1155", "Simple Storage", "Voting", "Escrow", "Multisig"]
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 20) {
+                    // Header
+                    VStack {
+                        Image(systemName: "doc.text.fill")
+                            .font(.system(size: 60))
+                            .foregroundColor(.blue)
+                        
+                        Text("Smart Contract Generator")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        
+                        Text("AI-powered contract creation with blockchain deployment")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding()
+                    
+                    // Contract Type Selector
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Contract Type")
+                            .font(.headline)
+                        
+                        Picker("Contract Type", selection: $contractType) {
+                            ForEach(contractTypes, id: \.self) { type in
+                                Text(type).tag(type)
+                            }
+                        }
+                        .pickerStyle(SegmentedPickerStyle())
+                    }
+                    .padding(.horizontal)
+                    
+                    // Description Input
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Description")
+                            .font(.headline)
+                        
+                        TextEditor(text: $description)
+                            .frame(height: 100)
+                            .padding(8)
+                            .background(Color.gray.opacity(0.1))
+                            .cornerRadius(8)
+                    }
+                    .padding(.horizontal)
+                    
+                    // Parameters based on contract type
+                    if contractType == "ERC721" || contractType == "ERC20" || contractType == "ERC1155" {
+                        VStack(alignment: .leading, spacing: 15) {
+                            Text("Token Parameters")
+                                .font(.headline)
+                            
+                            TextField("Token Name", text: $tokenName)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                            
+                            TextField("Token Symbol", text: $tokenSymbol)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                            
+                            if contractType == "ERC721" {
+                                TextField("Max Supply (optional)", text: $maxSupply)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .keyboardType(.numberPad)
+                            }
+                        }
+                        .padding(.horizontal)
+                    }
+                    
+                    // Generate Button
+                    Button(action: generateContract) {
+                        HStack {
+                            if viewModel.isGenerating {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                    .scaleEffect(0.8)
+                            }
+                            
+                            Text(viewModel.isGenerating ? "Generating..." : "Generate Smart Contract")
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(
+                            LinearGradient(
+                                colors: [.blue, .purple],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                    }
+                    .disabled(viewModel.isGenerating || description.isEmpty)
+                    .padding(.horizontal)
+                }
+            }
+            .navigationTitle("Generator")
+        }
+    }
+    
+    private func generateContract() {
+        var parameters: [String: String] = [:]
+        
+        if contractType == "ERC721" || contractType == "ERC20" || contractType == "ERC1155" {
+            parameters["tokenName"] = tokenName
+            parameters["tokenSymbol"] = tokenSymbol
+            if !maxSupply.isEmpty {
+                parameters["maxSupply"] = maxSupply
+            }
+        }
+        
+        viewModel.generateContract(
+            type: contractType,
+            description: description,
+            parameters: parameters
+        )
+    }
+}
+
+struct ContractsListView: View {
+    @ObservedObject var viewModel: ContractGeneratorViewModel
+    
+    var body: some View {
+        NavigationView {
+            List {
+                ForEach(viewModel.contracts, id: \.id) { contract in
+                    NavigationLink(destination: ContractDetailView(contract: contract, viewModel: viewModel)) {
+                        ContractRowView(contract: contract)
+                    }
+                }
+            }
+            .navigationTitle("My Contracts")
+            .overlay {
+                if viewModel.contracts.isEmpty {
+                    VStack(spacing: 20) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 60))
+                            .foregroundColor(.gray)
+                        
+                        Text("No contracts yet")
+                            .font(.headline)
+                            .foregroundColor(.gray)
+                        
+                        Text("Generate your first smart contract to get started")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ContractRowView: View {
+    let contract: GeneratedContract
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(contract.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                
+                Spacer()
+                
+                StatusBadge(status: contract.deploymentStatus)
+            }
+            
+            Text(contract.explanation)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+            
+            Text(contract.createdAt, style: .relative)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct StatusBadge: View {
+    let status: DeploymentStatus
+    
+    var body: some View {
+        Text(statusText)
+            .font(.caption2)
+            .fontWeight(.semibold)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(statusColor)
+            .foregroundColor(.white)
+            .cornerRadius(8)
+    }
+    
+    private var statusText: String {
+        switch status {
+        case .generated: return "Generated"
+        case .deploying: return "Deploying"
+        case .deployed: return "Deployed"
+        case .failed: return "Failed"
+        }
+    }
+    
+    private var statusColor: Color {
+        switch status {
+        case .generated: return .blue
+        case .deploying: return .orange
+        case .deployed: return .green
+        case .failed: return .red
+        }
+    }
+}
+
+struct ContractDetailView: View {
+    let contract: GeneratedContract
+    @ObservedObject var viewModel: ContractGeneratorViewModel
+    @State private var showingCode = false
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                // Header
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text(contract.name)
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        
+                        Spacer()
+                        
+                        StatusBadge(status: contract.deploymentStatus)
+                    }
+                    
+                    Text("Created \(contract.createdAt, style: .relative)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                // Contract Address
+                if let address = contract.contractAddress {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Contract Address")
+                            .font(.headline)
+                        
+                        Text(address)
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.blue.opacity(0.1))
+                            .cornerRadius(8)
+                    }
+                }
+                
+                // Explanation
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Explanation")
+                        .font(.headline)
+                    
+                    Text(contract.explanation)
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                }
+                
+                // Action Buttons
+                VStack(spacing: 15) {
+                    Button(action: { showingCode.toggle() }) {
+                        HStack {
+                            Image(systemName: "code")
+                            Text(showingCode ? "Hide Code" : "View Code")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.gray.opacity(0.2))
+                        .cornerRadius(10)
+                    }
+                    
+                    if contract.deploymentStatus == .generated {
+                        Button(action: { viewModel.deployContract(contract) }) {
+                            HStack {
+                                if viewModel.isDeploying {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                        .scaleEffect(0.8)
+                                }
+                                
+                                Image(systemName: "arrow.up.circle")
+                                Text(viewModel.isDeploying ? "Deploying..." : "Deploy to Blockchain")
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(
+                                LinearGradient(
+                                    colors: [.green, .blue],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                        }
+                        .disabled(viewModel.isDeploying)
+                    }
+                }
+                
+                // Code Display
+                if showingCode {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Smart Contract Code")
+                            .font(.headline)
+                        
+                        ScrollView {
+                            Text(contract.code)
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding()
+                                .background(Color.black.opacity(0.05))
+                                .cornerRadius(8)
+                        }
+                        .frame(maxHeight: 300)
+                    }
+                }
+            }
+            .padding()
+        }
+        .navigationTitle("Contract Details")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - App Entry Point
+@main
+struct SmartContractGeneratorApp: App {
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+    }
+}
